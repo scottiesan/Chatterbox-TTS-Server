@@ -27,6 +27,34 @@ model_device: Optional[str] = (
 )
 
 
+def unload_model() -> bool:
+    """
+    Unloads the TTS model and clears all related caches to free memory.
+    Updates global variables `chatterbox_model`, `MODEL_LOADED`, and `model_device`.
+
+    Returns:
+        bool: True if the model was unloaded successfully, False otherwise.
+    """
+    global chatterbox_model, MODEL_LOADED, model_device
+    
+    try:
+        chatterbox_model = None
+        MODEL_LOADED = False
+        model_device = None
+        gc.collect()
+        
+        if torch.mps.is_available():
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        logger.info("TTS model unloaded successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error unloading model: {e}", exc_info=True)
+        return False
+
+
 def set_seed(seed_value: int):
     """
     Sets the seed for torch, random, and numpy for reproducibility.
@@ -219,7 +247,25 @@ def synthesize(
     exaggeration: float = 0.5,
     cfg_weight: float = 0.5,
     seed: int = 0,
+    cleanup_interval: Optional[int] = None
 ) -> Tuple[Optional[torch.Tensor], Optional[int]]:
+    """
+    Synthesizes audio from text using the loaded TTS model.
+    Performs periodic memory cleanup during long operations if cleanup_interval is set.
+
+    Args:
+        text: The text to synthesize.
+        audio_prompt_path: Path to an audio file for voice cloning or predefined voice.
+        temperature: Controls randomness in generation.
+        exaggeration: Controls expressiveness.
+        cfg_weight: Classifier-Free Guidance weight.
+        seed: Random seed for generation. If 0, default randomness is used.
+        cleanup_interval: If set, performs memory cleanup every N characters processed.
+
+    Returns:
+        A tuple containing the audio waveform (torch.Tensor) and the sample rate (int),
+        or (None, None) if synthesis fails.
+    """
     """
     Synthesizes audio from text using the loaded TTS model.
 
@@ -252,19 +298,57 @@ def synthesize(
                 "Using default (potentially random) generation behavior as seed is 0."
             )
 
+        # Periodic cleanup for long operations
+        if cleanup_interval and len(text) > cleanup_interval:
+            chunks = [text[i:i+cleanup_interval] for i in range(0, len(text), cleanup_interval)]
+            results = []
+            for chunk in chunks:
+                result = _synthesize_chunk(
+                    chunk,
+                    audio_prompt_path,
+                    temperature,
+                    exaggeration,
+                    cfg_weight,
+                    seed
+                )
+                results.append(result)
+                gc.collect()
+                if model_device == "mps":
+                    torch.mps.empty_cache()
+                elif model_device == "cuda":
+                    torch.cuda.empty_cache()
+            
+            # Combine results
+            if all(r[0] is not None for r in results):
+                combined_wav = torch.cat([r[0] for r in results])
+                return combined_wav, results[0][1]
+            return None, None
+
         logger.debug(
             f"Synthesizing with params: audio_prompt='{audio_prompt_path}', temp={temperature}, "
             f"exag={exaggeration}, cfg_weight={cfg_weight}, seed_applied_globally_if_nonzero={seed}"
         )
 
-        # Call the core model's generate method
-        wav_tensor = chatterbox_model.generate(
-            text=text,
-            audio_prompt_path=audio_prompt_path,
-            temperature=temperature,
-            exaggeration=exaggeration,
-            cfg_weight=cfg_weight,
-        )
+        # Handle audio prompt with context manager if path provided
+        if audio_prompt_path:
+            with open(audio_prompt_path, 'rb') as f:
+                # Call the core model's generate method
+                wav_tensor = chatterbox_model.generate(
+                    text=text,
+                    audio_prompt_path=audio_prompt_path,
+                    temperature=temperature,
+                    exaggeration=exaggeration,
+                    cfg_weight=cfg_weight,
+                )
+        else:
+            # Call without audio prompt
+            wav_tensor = chatterbox_model.generate(
+                text=text,
+                audio_prompt_path=None,
+                temperature=temperature,
+                exaggeration=exaggeration,
+                cfg_weight=cfg_weight,
+            )
 
         # The ChatterboxTTS.generate method already returns a CPU tensor.
         gc.collect()
