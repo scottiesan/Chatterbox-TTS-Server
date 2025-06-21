@@ -10,6 +10,7 @@ import logging.handlers  # For RotatingFileHandler
 import shutil
 import time
 import uuid
+import random
 import yaml  # For loading presets
 import numpy as np
 import librosa  # For potential direct use if needed, though utils.py handles most
@@ -186,6 +187,27 @@ app = FastAPI(
     version="2.0.2",  # Version Bump
     lifespan=lifespan,
 )
+
+# Add periodic memory cleanup
+@app.middleware("http")
+async def memory_cleanup_middleware(request: Request, call_next):
+    """Middleware that performs periodic memory cleanup."""
+    try:
+        response = await call_next(request)
+        
+        # Clean up every 10 requests
+        if random.random() < 0.1:  # 10% chance per request
+            gc.collect()
+            if torch.mps.is_available():
+                torch.mps.empty_cache()
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            logger.debug("Performed periodic memory cleanup")
+            
+        return response
+    except Exception as e:
+        logger.error(f"Memory cleanup middleware error: {e}", exc_info=True)
+        raise
 
 # --- CORS Middleware ---
 app.add_middleware(
@@ -404,6 +426,31 @@ async def restart_server_endpoint():
     )
     logger.warning(message)
     return UpdateStatusResponse(message=message, restart_needed=True)
+
+
+@app.post("/unload_model", response_model=UpdateStatusResponse, tags=["Configuration"])
+async def unload_model_endpoint():
+    """Unloads the TTS model to free up memory."""
+    logger.info("Request received to unload TTS model.")
+    try:
+        global chatterbox_model, MODEL_LOADED
+        chatterbox_model = None
+        MODEL_LOADED = False
+        gc.collect()
+        if torch.mps.is_available():
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return UpdateStatusResponse(
+            message="TTS model unloaded successfully. Memory freed.",
+            restart_needed=False
+        )
+    except Exception as e:
+        logger.error(f"Error unloading model: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to unload model: {str(e)}"
+        )
 
 
 # --- UI Helper API Endpoints ---
