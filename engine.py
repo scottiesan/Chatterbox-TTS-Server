@@ -5,6 +5,7 @@ import logging
 import random
 import numpy as np
 import torch
+import gc
 from typing import Optional, Tuple
 from pathlib import Path
 
@@ -60,6 +61,30 @@ def _test_cuda_functionality() -> bool:
         return False
 
 
+def _test_mps_functionality() -> bool:
+    """
+    Tests if MPS (Metal Performance Shaders) is actually functional, not just available.
+
+    Returns:
+        bool: True if MPS works, False otherwise.
+    """
+    if not torch.backends.mps.is_available():
+        logger.info("MPS not available (torch.backends.mps.is_available() == False)")
+        return False
+
+    try:
+        # More comprehensive test that includes operations
+        a = torch.rand(2,2,device='mps')
+        b = torch.rand(2,2,device='mps')
+        c = a + b  # Test basic operation
+        c = c.cpu()  # Test transfer back to CPU
+        logger.info("MPS functionality test passed successfully")
+        return True
+    except Exception as e:
+        logger.warning(f"MPS functionality test failed: {str(e)}", exc_info=True)
+        return False
+
+
 def load_model() -> bool:
     """
     Loads the TTS model.
@@ -77,16 +102,20 @@ def load_model() -> bool:
         return True
 
     try:
-        # Determine processing device with robust CUDA detection and intelligent fallback
+        # Determine processing device with robust detection and intelligent fallback
         device_setting = config_manager.get_string("tts_engine.device", "auto")
 
         if device_setting == "auto":
-            if _test_cuda_functionality():
+            # First check MPS since we're on macOS
+            if _test_mps_functionality():
+                resolved_device_str = "mps"
+                logger.info("MPS functionality test passed. Using MPS (auto-detected).")
+            elif _test_cuda_functionality():
                 resolved_device_str = "cuda"
-                logger.info("CUDA functionality test passed. Using CUDA.")
+                logger.info("CUDA functionality test passed. Using CUDA (auto-detected).")
             else:
                 resolved_device_str = "cpu"
-                logger.info("CUDA not functional or not available. Using CPU.")
+                logger.info("Neither MPS nor CUDA available. Using CPU (auto-detected).")
 
         elif device_setting == "cuda":
             if _test_cuda_functionality():
@@ -97,6 +126,18 @@ def load_model() -> bool:
                 logger.warning(
                     "CUDA was requested in config but functionality test failed. "
                     "PyTorch may not be compiled with CUDA support. "
+                    "Automatically falling back to CPU."
+                )
+
+        elif device_setting == "mps":
+            if _test_mps_functionality():
+                resolved_device_str = "mps"
+                logger.info("MPS requested and functional. Using MPS.")
+            else:
+                resolved_device_str = "cpu"
+                logger.warning(
+                    "MPS was requested in config but functionality test failed. "
+                    "PyTorch may not be compiled with MPS support or not on macOS. "
                     "Automatically falling back to CPU."
                 )
 
@@ -140,6 +181,9 @@ def load_model() -> bool:
             )
             chatterbox_model = None
             MODEL_LOADED = False
+            gc.collect()
+            if model_device == "mps":
+                torch.mps.empty_cache()
             return False
 
         MODEL_LOADED = True
@@ -162,6 +206,9 @@ def load_model() -> bool:
         )
         chatterbox_model = None
         MODEL_LOADED = False
+        gc.collect()
+        if model_device == "mps":
+            torch.mps.empty_cache()
         return False
 
 
@@ -220,10 +267,16 @@ def synthesize(
         )
 
         # The ChatterboxTTS.generate method already returns a CPU tensor.
+        gc.collect()
+        if model_device == "mps":
+            torch.mps.empty_cache()
         return wav_tensor, chatterbox_model.sr
 
     except Exception as e:
         logger.error(f"Error during TTS synthesis: {e}", exc_info=True)
+        gc.collect()
+        if model_device == "mps":
+            torch.mps.empty_cache()
         return None, None
 
 

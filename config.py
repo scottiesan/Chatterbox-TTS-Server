@@ -199,7 +199,7 @@ class YamlConfigManager:
         if current_device_setting == "auto":
             resolved_device = self._detect_best_device()
             _set_nested_value(config_data, ["tts_engine", "device"], resolved_device)
-        elif current_device_setting not in ["cuda", "cpu"]:
+        elif current_device_setting not in ["cuda", "cpu", "mps"]:
             logger.warning(
                 f"Invalid TTS device '{current_device_setting}' in configuration. "
                 f"Defaulting to auto-detection."
@@ -230,29 +230,44 @@ class YamlConfigManager:
         """
         Robustly detects the best available device for TTS processing.
         Tests actual CUDA functionality rather than just checking availability.
+        On macOS, prioritizes MPS (Metal Performance Shaders) if available.
 
         Returns:
-            str: 'cuda' if CUDA is truly functional, 'cpu' otherwise.
+            str: 'mps' if on macOS with MPS available, 'cuda' if CUDA is truly functional,
+                 'cpu' otherwise.
         """
-        if not torch.cuda.is_available():
-            logger.info(
-                "CUDA not available according to torch.cuda.is_available(). Using CPU."
-            )
-            return "cpu"
+        # First check for MPS on macOS (prioritize MPS when available)
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            try:
+                # Test MPS functionality
+                a = torch.rand(2,2,device='mps')
+                b = torch.rand(2,2,device='mps')
+                c = a + b
+                c = c.cpu()  # Clean up
+                logger.info("MPS test successful. Using MPS device.")
+                return "mps"
+            except Exception as e:
+                logger.warning(
+                    f"MPS is reported as available but failed functionality test: {e}"
+                )
 
-        try:
-            # Actually test CUDA functionality by creating a tensor and moving it to CUDA
-            test_tensor = torch.tensor([1.0])
-            test_tensor = test_tensor.cuda()
-            test_tensor = test_tensor.cpu()  # Clean up
-            logger.info("CUDA test successful. Using CUDA device.")
-            return "cuda"
-        except Exception as e:
-            logger.warning(
-                f"CUDA is reported as available but failed functionality test: {e}. "
-                f"This usually means PyTorch was not compiled with CUDA support. Using CPU."
-            )
-            return "cpu"
+        # Then check CUDA
+        if torch.cuda.is_available():
+            try:
+                # Test CUDA functionality
+                test_tensor = torch.tensor([1.0])
+                test_tensor = test_tensor.cuda()
+                test_tensor = test_tensor.cpu()  # Clean up
+                logger.info("CUDA test successful. Using CUDA device.")
+                return "cuda"
+            except Exception as e:
+                logger.warning(
+                    f"CUDA is reported as available but failed functionality test: {e}. "
+                    f"This usually means PyTorch was not compiled with CUDA support."
+                )
+
+        logger.info("No GPU acceleration available. Using CPU.")
+        return "cpu"
 
     def _prepare_config_for_saving(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
         """

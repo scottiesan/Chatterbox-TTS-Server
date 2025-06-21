@@ -18,6 +18,8 @@ from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any, Literal
 import webbrowser  # For automatic browser opening
 import threading  # For automatic browser opening
+import gc
+import torch
 
 from fastapi import (
     FastAPI,
@@ -329,7 +331,13 @@ async def save_settings_endpoint(request: Request):
             raise ValueError("Request body must be a JSON object for /save_settings.")
         logger.debug(f"Received partial config data to save: {partial_update}")
 
+        # Preserve current device setting to prevent UI from overriding it
+        current_device = config_manager.get("tts_engine.device")
+        
         if config_manager.update_and_save(partial_update):
+            # Restore the device setting after update
+            if current_device:
+                config_manager.update_and_save({"tts_engine": {"device": current_device}})
             restart_needed = any(
                 key in partial_update
                 for key in ["server", "tts_engine", "paths", "model"]
@@ -801,6 +809,15 @@ async def custom_tts_endpoint(
             error_detail = f"Error processing audio chunk {i+1}: {str(e_chunk)}"
             logger.error(error_detail, exc_info=True)
             raise HTTPException(status_code=500, detail=error_detail)
+        finally:
+            del chunk_audio_tensor
+            del current_processed_audio_tensor
+            gc.collect()
+            if torch.mps.is_available():
+                torch.mps.empty_cache()
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
 
     if not all_audio_segments_np:
         logger.error("No audio segments were successfully generated.")
@@ -853,6 +870,13 @@ async def custom_tts_endpoint(
         logger.error(f"Audio concatenation failed: {e_concat}", exc_info=True)
         for idx, seg in enumerate(all_audio_segments_np):
             logger.error(f"Segment {idx} shape: {seg.shape}, dtype: {seg.dtype}")
+        # Clean up memory on error
+        del all_audio_segments_np
+        gc.collect()
+        if torch.mps.is_available():
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
         raise HTTPException(
             status_code=500, detail=f"Audio concatenation error: {e_concat}"
         )
@@ -870,6 +894,14 @@ async def custom_tts_endpoint(
     perf_monitor.record(
         f"Final audio encoded to {output_format_str} (target SR: {final_output_sample_rate}Hz from engine SR: {engine_output_sample_rate}Hz)"
     )
+    
+    # Clean up memory after final processing
+    del final_audio_np
+    gc.collect()
+    if torch.mps.is_available():
+        torch.mps.empty_cache()
+    elif torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     if encoded_audio_bytes is None or len(encoded_audio_bytes) < 100:
         logger.error(

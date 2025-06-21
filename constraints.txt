@@ -1,0 +1,15 @@
+# hard pins for packages the resolver keeps downgrading
+onnx==1.17.0
+s3tokenizer==0.1.7
+
+# stay on the modern toolchain
+ipython==8.18.1
+pickleshare==0.7.5
+path.py==12.5.0
+
+# loudnorm / audiotools’ dependency rabbit-hole
+rich==13.9.4
+markdown-it-py==3.0.0
+fire==0.7.0           # avoid fire 0.x series
+
+randomname==0.2.1
